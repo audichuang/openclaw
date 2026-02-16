@@ -384,27 +384,10 @@ async function findPageByTargetId(
   cdpUrl?: string,
 ): Promise<Page | null> {
   const pages = await getAllPages(browser);
-  let resolvedViaCdp = false;
-  // First, try the standard CDP session approach
-  for (const page of pages) {
-    let tid: string | null = null;
-    try {
-      tid = await pageTargetId(page);
-      resolvedViaCdp = true;
-    } catch {
-      tid = null;
-    }
-    if (tid && tid === targetId) {
-      return page;
-    }
-  }
-  // Extension relays can block CDP attachment APIs entirely. If that happens and
-  // Playwright only exposes one page, return it as the best available mapping.
-  if (!resolvedViaCdp && pages.length === 1) {
-    return pages[0];
-  }
-  // If CDP sessions fail (e.g., extension relay blocks Target.attachToBrowserTarget),
-  // fall back to URL-based matching using the /json/list endpoint
+
+  // FIX: For extension relay, prioritize /json/list approach
+  // The problem is that Playwright maintains its own targetId mapping,
+  // but extension relay returns different targetIds via /json/list
   if (cdpUrl) {
     try {
       const baseUrl = cdpUrl
@@ -419,6 +402,8 @@ async function findPageByTargetId(
           url: string;
           title?: string;
         }>;
+
+        // First, try exact targetId match from /json/list
         const target = targets.find((t) => t.id === targetId);
         if (target) {
           // Try to find a page with matching URL
@@ -426,23 +411,57 @@ async function findPageByTargetId(
           if (urlMatch.length === 1) {
             return urlMatch[0];
           }
-          // If multiple URL matches, use index-based matching as fallback
-          // This works when Playwright and the relay enumerate tabs in the same order
+          // If multiple URL matches, try to match by title
           if (urlMatch.length > 1) {
-            const sameUrlTargets = targets.filter((t) => t.url === target.url);
-            if (sameUrlTargets.length === urlMatch.length) {
-              const idx = sameUrlTargets.findIndex((t) => t.id === targetId);
-              if (idx >= 0 && idx < urlMatch.length) {
-                return urlMatch[idx];
-              }
+            const title = await Promise.all(urlMatch.map((p) => p.title()));
+            const titleMatch = urlMatch.filter((p, i) => title[i] === target.title);
+            if (titleMatch.length === 1) {
+              return titleMatch[0];
             }
+          }
+          // Last resort: use index-based matching
+          // This works when Playwright and relay enumerate tabs in same order
+          const idx = targets.findIndex((t) => t.id === targetId);
+          if (idx >= 0 && idx < pages.length) {
+            return pages[idx];
+          }
+        }
+
+        // If exact id match fails, try prefix matching
+        const prefixMatch = targets.find((t) => t.id.startsWith(targetId));
+        if (prefixMatch) {
+          const urlMatch = pages.filter((p) => p.url() === prefixMatch.url);
+          if (urlMatch.length === 1) {
+            return urlMatch[0];
           }
         }
       }
     } catch {
-      // Ignore fetch errors and fall through to return null
+      // Ignore fetch errors and fall through to other methods
     }
   }
+
+  // Fallback: try CDP session approach (original logic)
+  let resolvedViaCdp = false;
+  for (const page of pages) {
+    let tid: string | null = null;
+    try {
+      tid = await pageTargetId(page);
+      resolvedViaCdp = true;
+    } catch {
+      tid = null;
+    }
+    if (tid && tid === targetId) {
+      return page;
+    }
+  }
+
+  // Extension relays can block CDP attachment APIs entirely. If that happens and
+  // Playwright only exposes one page, return it as the best available mapping.
+  if (!resolvedViaCdp && pages.length === 1) {
+    return pages[0];
+  }
+
   return null;
 }
 
